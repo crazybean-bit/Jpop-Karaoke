@@ -157,7 +157,7 @@ dialog::backdrop { background: rgba(6, 6, 14, .7); }
 .finder .acts { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .finder .fmsg { font-size: 13px; color: var(--muted); margin: 0; flex: 1 1 200px; min-width: 0; }
 .finder .fmsg a { color: var(--sung); }
-.results { display: flex; flex-direction: column; gap: 6px; }
+.results { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; }
 .result { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; width: 100%; }
 .result:hover, .result.picked { border-color: var(--accent); }
 .result b { font-family: var(--font-jp); font-weight: 700; min-width: 0; }
@@ -476,9 +476,11 @@ function renderTiles(idx) {
   const nx = L[Math.max(0, idx) + 1];
   $("next").innerHTML = nx ? `<small>Next</small><span>${esc(nx.jp)}</span>` : "";
   // karaoke sweep timings, by character count
-  const total = curWords.reduce((a, w) => a + w.s.length, 0) || 1;
+  // weight by sung syllables (kana in the reading), since a kanji word can take several beats
+  const beats = (w) => (w.reading ? w.reading.replace(/[ゃゅょぁぃぅぇぉゎ]/g, "").length : JP_RE.test(w.s) ? w.s.length : Math.max(1, Math.round(w.s.length / 3)));
+  const total = curWords.reduce((a, w) => a + beats(w), 0) || 1;
   let acc = 0;
-  curWords.forEach((w) => { w.a = acc / total; acc += w.s.length; w.b = acc / total; });
+  curWords.forEach((w) => { w.a = acc / total; acc += beats(w); w.b = acc / total; });
   wordEls = [...$("tiles").querySelectorAll(".w")];
   chunkEls = [...$("tiles").querySelectorAll(".chunk")];
 }
@@ -613,7 +615,6 @@ function openEditor(isNew) {
   $("findResults").innerHTML = "";
   $("findMsg").textContent = "Fill in the title (and artist if you know it), then search a free synced-lyrics library.";
   if (isNew && mediaName) { const g = guessFromName(mediaName); $("edTitle").value = g.title; $("edArtist").value = g.artist; }
-  $("edTranslate").hidden = !sampleFn;
   player.pause();
   ed.showModal();
 }
@@ -647,7 +648,6 @@ $("edDelete").onclick = () => {
 let sampleFn = null;
 (async () => {
   try { sampleFn = (await window.claude?.use?.("sample")) || null; } catch { sampleFn = null; }
-  $("edTranslate").hidden = !sampleFn;
 })();
 /* ---------- find lyrics (LRCLIB, fetched live in the viewer's browser) ---------- */
 function guessFromName(n) {
@@ -680,7 +680,7 @@ async function lrclib(params, tries = 2) {
   }
 }
 function renderFound(pickedId) {
-  $("findResults").innerHTML = found.slice(0, 6).map((r, i) =>
+  $("findResults").innerHTML = found.slice(0, 15).map((r, i) =>
     `<button type="button" class="result${r.id === pickedId ? " picked" : ""}" data-i="${i}"><b>${esc(r.trackName)}</b><em>${r.syncedLyrics ? "timed" : "no timing"}${r.id === pickedId ? "<br>using this" : ""}</em><span>${esc([r.artistName, r.albumName, r.duration ? fmt(r.duration) : ""].filter(Boolean).join(" · "))}</span></button>`).join("");
 }
 function applyFound(r) {
@@ -688,8 +688,7 @@ function applyFound(r) {
   $("edTitle").value = r.trackName || $("edTitle").value;
   $("edArtist").value = r.artistName || $("edArtist").value;
   renderFound(r.id);
-  if (sampleFn) $("edTranslate").click();
-  else $("edMsg").textContent = "Lyrics filled in. Add English under each line, then press Save.";
+  $("edTranslate").click();
 }
 $("findResults").addEventListener("click", (e) => {
   const b = e.target.closest(".result"); if (!b) return;
@@ -705,15 +704,29 @@ $("edFind").onclick = async () => {
   const dur = hasAudio && isFinite(audio.duration) ? audio.duration : null;
   const slow = setTimeout(() => { $("findMsg").textContent = "Still searching. The lyrics library can be slow…"; }, 6000);
   try {
-    let list = await lrclib({ track_name: title, artist_name: artist });
-    if (!list.length) list = await lrclib({ q: `${title} ${artist}`.trim() });
-    found = list.filter((r) => !r.instrumental && (r.syncedLyrics || r.plainLyrics));
-    if (!found.length) { showFindHelp("No match found. Try the Japanese title or check the spelling."); return; }
-    const score = (r) => (norm(r.trackName) === norm(title) ? 0 : 20) + (artist && norm(r.artistName).includes(norm(artist)) ? 0 : 10) +
+    const romajiOf = (t) => { const ch = analyze(t); return ch ? ch.flatMap((c) => c.words).map((w) => w.roma || w.s).join("") : t; };
+    const nt = norm(title);
+    const titleScore = (r) => { const a = norm(r.trackName), b = norm(romajiOf(r.trackName)); return a === nt || b === nt ? 0 : (a.includes(nt) || b.includes(nt) || (b && nt.includes(b))) ? 5 : 20; };
+    const usable = (l) => l.filter((r) => !r.instrumental && (r.syncedLyrics || r.plainLyrics));
+    let list = usable(await lrclib({ track_name: title, artist_name: artist }));
+    if (!list.some((r) => titleScore(r) < 20)) list = list.concat(usable(await lrclib({ q: `${title} ${artist}`.trim() })));
+    // English or romaji titles rarely match the Japanese title on file, so fall back to the artist's songs
+    let byArtist = false;
+    if (!list.some((r) => titleScore(r) < 20) && artist) { list = list.concat(usable(await lrclib({ q: artist }))); byArtist = true; }
+    found = [...new Map(list.map((r) => [r.id, r])).values()];
+    if (!found.length) { showFindHelp(artist ? "No match found. Check the spelling of the title and artist." : "No match found. Add the artist name and try again."); return; }
+    const score = (r) => titleScore(r) + (artist && norm(r.artistName).includes(norm(artist)) ? 0 : 10) +
       (r.syncedLyrics ? 0 : 5) + (JP_RE.test(r.syncedLyrics || r.plainLyrics) ? 0 : 15) + (dur && r.duration ? Math.min(30, Math.abs(r.duration - dur)) : 0);
     found.sort((a, b) => score(a) - score(b));
     const best = found[0];
     const lenMatch = dur && best.duration && Math.abs(best.duration - dur) <= 3;
+    if (byArtist && titleScore(best) === 20) {
+      found = found.filter((r) => !artist || norm(r.artistName).includes(norm(artist)));
+      if (!found.length) { showFindHelp("No match found. Check the spelling of the title and artist."); return; }
+      $("findMsg").textContent = `No song called "${title}" turned up, probably because it's listed under its Japanese title. Here are songs by ${artist}. Pick yours:`;
+      renderFound(null);
+      return;
+    }
     const sure = score(best) <= 10 && (lenMatch || found.length === 1 || score(found[1]) - score(best) >= 10);
     if (sure) {
       $("findMsg").textContent = `Found "${best.trackName}" by ${best.artistName}${lenMatch ? ", same length as your file" : ""}. Check it below, or pick another match.`;
@@ -731,9 +744,40 @@ $("edFind").onclick = async () => {
   } finally { clearTimeout(slow); btn.disabled = false; }
 };
 
+async function machineTranslate(text) {
+  const u = new URL("https://api.mymemory.translated.net/get");
+  u.searchParams.set("q", text); u.searchParams.set("langpair", "ja|en");
+  const r = await fetch(u.href);
+  if (!r.ok) throw new Error("http " + r.status);
+  const j = await r.json();
+  const t = j?.responseData?.translatedText;
+  if (!t || String(j.responseStatus) !== "200" || /MYMEMORY WARNING/i.test(t)) throw Object.assign(new Error(t || "no result"), { code: "quota" });
+  const d = document.createElement("textarea"); d.innerHTML = t; return d.value;
+}
+async function translateWithoutClaude(s) {
+  const todo = s.lines.filter((l) => !l.en && JP_RE.test(l.jp));
+  if (!todo.length) { $("edMsg").textContent = "Every line already has a translation."; return; }
+  const btn = $("edTranslate"); btn.disabled = true;
+  let done = 0, failed = null;
+  const next = async () => {
+    while (todo.length && !failed) {
+      const l = todo.shift();
+      try { l.en = await machineTranslate(l.jp); done++; $("edMsg").textContent = `Translated ${done} line${done > 1 ? "s" : ""}…`; }
+      catch (e) { failed = e; }
+    }
+  };
+  $("edMsg").textContent = "Translating…";
+  await Promise.all([next(), next(), next()]);
+  saveSongs(); renderSong();
+  $("edText").value = lyricsToText(s.lines);
+  $("edMsg").textContent = failed
+    ? (failed.code === "quota" ? `Translated ${done} lines, then hit the free translator's daily limit. Press Translate missing again tomorrow, or type the rest yourself.` : `Translated ${done} lines, then the translator stopped answering. Press Translate missing to try the rest again.`)
+    : "Done. This is a quick machine translation, so check it and fix anything odd, then press Save.";
+  btn.disabled = false;
+}
 $("edTranslate").onclick = async () => {
-  if (!sampleFn) return;
   const s = commitEditor();
+  if (!sampleFn) return translateWithoutClaude(s);
   const todo = s.lines.map((l, i) => ({ l, i })).filter(({ l }) => !l.en || !l.gloss);
   if (!todo.length) { $("edMsg").textContent = "Every line already has a translation."; return; }
   const btn = $("edTranslate");

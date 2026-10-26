@@ -14,6 +14,8 @@ No lyrics are bundled with the app. The built-in sample song uses original text 
 
 ## How it works
 
+Word meanings come from [JMdict](https://www.edrdg.org/wiki/index.php/JMdict-EDICT_Dictionary_Project) by the Electronic Dictionary Research and Development Group, used under [CC BY-SA 4.0](https://www.edrdg.org/edrdg/licence.html). `dict/gloss.json` is a trimmed list of its common words.
+
 Japanese text is split into words with [kuromoji.js](https://github.com/takuyaa/kuromoji.js) and its IPADIC dictionary (in `dict/`, Apache 2.0). The dictionary files carry a `.wasm` suffix so any static host serves them as binary.
 
 ## Hosting

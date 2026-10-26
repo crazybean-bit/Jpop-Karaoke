@@ -352,12 +352,14 @@ function analyze(text) {
   if (tokCache.has(text)) return tokCache.get(text);
   const toks = tokenizer.tokenize(text);
   const chunks = [];
-  let cur = null, prevPrefix = false;
+  let cur = null, prevPrefix = false, prevTk = null;
   for (const tk of toks) {
     const s = tk.surface_form;
     if (/^[\s　]+$/.test(s)) { cur = null; prevPrefix = false; continue; }
     const [cls, label] = posInfo(tk);
     let reading = tk.reading && tk.reading !== "*" ? tk.reading : (isKana(s) ? s : "");
+    // in lyrics 君 is almost always "kimi" (you); the dictionary often reads it as the name suffix "kun"
+    if (s === "君" && prevTk?.pos_detail_1 !== "固有名詞") reading = "キミ";
     let roma = reading ? toRomaji(reading) : "";
     if (tk.pos === "助詞") { if (s === "は") roma = "wa"; else if (s === "へ") roma = "e"; else if (s === "を") roma = "o"; }
     const w = { s, cls, label, base: tk.basic_form && tk.basic_form !== "*" ? tk.basic_form : s, furi: hasKanji(s) && reading ? kataToHira(reading) : "", reading: reading ? kataToHira(reading) : "", roma };
@@ -366,6 +368,7 @@ function analyze(text) {
     if (!cur || !dependent) { cur = { words: [], head: cls }; chunks.push(cur); }
     cur.words.push(w);
     prevPrefix = tk.pos === "接頭詞";
+    prevTk = tk;
   }
   tokCache.set(text, chunks);
   return chunks;
@@ -535,6 +538,29 @@ function frame() {
   requestAnimationFrame(frame);
 }
 
+/* ---------- word meanings (JMdict, common words) ---------- */
+let jmdict = null;
+const GRAMMAR = {
+  "は": "topic marker", "が": "subject marker; but", "を": "object marker", "に": "to; at; in; for", "へ": "toward", "で": "at; in; by; with",
+  "と": "and; with; when; (quoting)", "の": "'s; of; (makes a noun)", "も": "also; too; even", "や": "and (among others)", "か": "question marker; or",
+  "よ": "(sentence-end emphasis)", "ね": "right?; isn't it", "な": "(emphasis); don't", "わ": "(soft emphasis)", "さ": "(casual emphasis)", "ぞ": "(strong emphasis)",
+  "から": "from; because", "まで": "until; up to", "より": "than; from", "けど": "but; although", "けれど": "but; although", "のに": "even though",
+  "ので": "because", "て": "(links verbs: and)", "ば": "if; when", "たら": "if; when", "ながら": "while", "だけ": "only; just", "しか": "only (with negative)",
+  "ほど": "to the extent of", "など": "and so on", "って": "(quoting); about", "ても": "even if", "でも": "even; but", "し": "and also", "ずつ": "each",
+  "た": "(past tense)", "だ": "is; am; are", "です": "is (polite)", "ます": "(polite verb ending)", "ない": "not", "ぬ": "not", "ん": "not", "ず": "without",
+  "たい": "want to", "う": "let's; will", "よう": "let's; will; like", "まい": "won't; let's not", "れる": "(passive); can", "られる": "(passive); can",
+  "せる": "make (someone) do", "させる": "make (someone) do", "らしい": "seems; apparently", "そう": "looks like; I hear", "てる": "(-ing; ongoing state)",
+  "ちゃう": "(end up doing)", "じゃう": "(end up doing)", "べし": "should",
+};
+function wordMeaning(w) {
+  if ((w.cls === "particle" || w.cls === "aux") && GRAMMAR[w.base]) return GRAMMAR[w.base];
+  if (!jmdict) return "";
+  return (w.s === w.base && w.reading && jmdict[w.base + "|" + w.reading]) || jmdict[w.base] || jmdict[w.s] || GRAMMAR[w.base] || "";
+}
+function loadMeanings() {
+  fetch("dict/gloss.json").then((r) => (r.ok ? r.json() : null)).then((j) => { if (j) jmdict = j; }).catch(() => {});
+}
+
 /* ---------- word popover ---------- */
 let pop = null;
 function closePop() { pop?.remove(); pop = null; }
@@ -545,15 +571,16 @@ $("tiles").addEventListener("click", (e) => {
   if (!w) return;
   closePop();
   const g = song.lines[curIdx]?.gloss || {};
-  const gloss = g[w.base] || g[w.s] || "";
+  const gloss = g[w.base] || g[w.s] || wordMeaning(w);
   pop = document.createElement("div");
   pop.className = "pop";
   pop.innerHTML =
     `<div class="pos" style="color:var(--pos-${w.cls})">${esc(w.label)}</div>
      <div class="big">${esc(w.s)}</div>
      <div class="rd">${esc([w.reading, w.roma].filter(Boolean).join(" · "))}${w.base !== w.s ? ` · dictionary form ${esc(w.base)}` : ""}</div>
-     <div class="gl">${gloss ? esc(gloss) : `<span style="color:var(--muted)">No gloss saved for this word yet.</span>`}</div>
-     <a href="https://jisho.org/search/${encodeURIComponent(w.base)}" target="_blank" rel="noopener">Look up on Jisho ↗</a>`;
+     <div class="gl">${gloss ? esc(gloss) : `<span style="color:var(--muted)">${jmdict ? "Not in the built-in dictionary." : "Word meanings are still loading."}</span>`}</div>
+     <a href="https://jisho.org/search/${encodeURIComponent(w.base)}" target="_blank" rel="noopener">Look up on Jisho ↗</a>
+     <div style="color:var(--muted);font-size:11px">Meanings from <a href="https://www.edrdg.org/wiki/index.php/JMdict-EDICT_Dictionary_Project" target="_blank" rel="noopener" style="font-size:11px">JMdict</a> (EDRDG, CC BY-SA 4.0)</div>`;
   $("stage").appendChild(pop);
   const sr = $("stage").getBoundingClientRect(), r = el.getBoundingClientRect();
   const left = Math.min(Math.max(12, r.left - sr.left), sr.width - pop.offsetWidth - 12);
@@ -909,6 +936,7 @@ if (window.kuromoji) {
   kuromoji.builder({ dicPath: "dict/" }).build((err, tk) => {
     if (err) { $("status").textContent = "Dictionary didn't load, so furigana and romaji are off."; return; }
     tokenizer = tk; tokCache.clear(); curIdx = -2;
+    loadMeanings();
     $("status").textContent = "Tap a word for its meaning";
   });
 } else {

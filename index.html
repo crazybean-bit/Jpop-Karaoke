@@ -105,6 +105,11 @@ select.btn { padding-right: 10px; max-width: 220px; }
 .legend i { display: inline-block; width: 14px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
 
 /* sync banner */
+.timing { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: var(--surface); border-radius: 14px; padding: 10px 12px; }
+.timing .grp { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.timing .tl { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin-right: 2px; }
+.btn.sm { padding: 6px 10px; font-size: 13px; border-radius: 8px; font-variant-numeric: tabular-nums; }
+.timing .tmsg { flex: 1 1 100%; font-size: 13px; color: var(--muted); margin: 0; min-width: 0; }
 .syncbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; background: color-mix(in srgb, var(--accent) 16%, var(--surface)); border: 1px solid var(--accent); border-radius: 12px; padding: 10px 12px; }
 .syncbar p { margin: 0; flex: 1 1 220px; min-width: 0; font-size: 14px; }
 .syncbar p b { font-family: var(--font-jp); }
@@ -198,6 +203,17 @@ dialog::backdrop { background: rgba(6, 6, 14, .7); }
     <label class="btn" for="audioFile">Load audio or video…</label>
     <input type="file" id="audioFile" accept="audio/*,video/*,.m4a,.mp3,.ogg,.wav,.flac,.mp4,.mov,.webm,.m4v" hidden>
     <span class="audioname" id="audioName">No media, using timer</span>
+  </div>
+
+  <div class="timing" id="timing" aria-label="Fix timing">
+    <div class="grp"><span class="tl">Whole song</span>
+      <button type="button" class="btn sm" data-shift="-0.5">&minus;0.5s</button><button type="button" class="btn sm" data-shift="-0.1">&minus;0.1s</button><button type="button" class="btn sm" data-shift="0.1">+0.1s</button><button type="button" class="btn sm" data-shift="0.5">+0.5s</button></div>
+    <div class="grp"><span class="tl">This line</span>
+      <button type="button" class="btn sm" data-nudge="-0.2">&minus;0.2s</button><button type="button" class="btn sm" data-nudge="0.2">+0.2s</button></div>
+    <div class="grp">
+      <button type="button" class="btn sm primary" id="markBtn">Line starts now (N)</button>
+      <button type="button" class="btn sm" id="undoBtn" disabled>Undo</button></div>
+    <p class="tmsg" id="timingMsg">Lyrics too early? Press +. Too late? Press &minus;. Or play the song and press <b>Line starts now</b> right when a line begins.</p>
   </div>
 
   <section class="sheet">
@@ -497,7 +513,7 @@ function frame() {
     const line = song.lines[shown];
     if (line && wordEls.length) {
       const end = song.lines[shown + 1]?.t ?? line.t + 5;
-      const span = Math.max(0.8, (end - line.t) * 0.88);
+      const span = Math.max(0.8, Math.min((end - line.t) * 0.92, line.jp.length * 0.42 + 1)); // don't stretch the sweep across instrumental gaps
       const p = idx < 0 ? 0 : Math.min(1, Math.max(0, (t - line.t) / span));
       let onChunk = null;
       wordEls.forEach((el, i) => {
@@ -568,6 +584,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === " ") { e.preventDefault(); $("playBtn").click(); }
   else if (e.key === "ArrowLeft") jumpLine(-1);
   else if (e.key === "ArrowRight") jumpLine(1);
+  else if (e.key === "n" || e.key === "N") markLine();
   else if (e.key === "Escape" && sync.on) endSync(false);
 });
 
@@ -749,6 +766,53 @@ ${listing}`;
       : e?.code === "rate_limited" ? "Too many requests right now. Try again in a minute."
       : "Translation didn't come back. Try again, or type the English under each line.";
   } finally { btn.disabled = false; }
+};
+
+/* ---------- fix timing ---------- */
+let undoTimes = null;
+function retime(change, msg) {
+  if (!song.lines.length) return;
+  undoTimes = { id: song.id, times: song.lines.map((l) => l.t) };
+  change(song.lines);
+  saveSongs(); renderSheet(); curIdx = -2;
+  $("undoBtn").disabled = false;
+  $("timingMsg").textContent = msg;
+}
+$("timing").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-shift], button[data-nudge]");
+  if (!b || !song.lines.length) return;
+  if (b.dataset.shift) {
+    const d = +b.dataset.shift;
+    retime((L) => L.forEach((l) => (l.t = Math.max(0, +(l.t + d).toFixed(2)))),
+      `Moved every line ${Math.abs(d)}s ${d > 0 ? "later" : "earlier"}.`);
+  } else {
+    const i = Math.max(0, lineIndexAt(player.now())), d = +b.dataset.nudge;
+    retime((L) => {
+      const lo = i ? L[i - 1].t + 0.05 : 0, hi = L[i + 1] ? L[i + 1].t - 0.05 : Infinity;
+      L[i].t = Math.min(hi, Math.max(lo, +(L[i].t + d).toFixed(2)));
+    }, `Line ${i + 1} now starts at ${fmtStamp(song.lines[i].t + d)}.`);
+  }
+});
+// sets whichever line start is closest to the playhead (the one showing, or the one about to)
+function markLine() {
+  const L = song.lines, t = player.now();
+  if (!L.length || sync.on) return;
+  const cur = lineIndexAt(t);
+  const cands = [cur, cur + 1].filter((k) => k >= 0 && k < L.length);
+  const i = cands.reduce((a, k) => (Math.abs(L[k].t - t) < Math.abs(L[a].t - t) ? k : a), cands[0]);
+  retime((L) => {
+    const lo = i ? L[i - 1].t + 0.05 : 0;
+    L[i].t = Math.max(lo, +t.toFixed(2));
+    for (let j = i + 1; j < L.length && L[j].t <= L[j - 1].t; j++) L[j].t = +(L[j - 1].t + 0.5).toFixed(2);
+  }, `Line ${i + 1} now starts at ${fmtStamp(Math.max(i ? L[i - 1].t + 0.05 : 0, t))}.`);
+}
+$("markBtn").onclick = markLine;
+$("undoBtn").onclick = () => {
+  if (!undoTimes || undoTimes.id !== song.id || undoTimes.times.length !== song.lines.length) return;
+  song.lines.forEach((l, i) => (l.t = undoTimes.times[i]));
+  undoTimes = null; $("undoBtn").disabled = true;
+  saveSongs(); renderSheet(); curIdx = -2;
+  $("timingMsg").textContent = "Undone.";
 };
 
 /* ---------- tap to sync ---------- */

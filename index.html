@@ -645,16 +645,22 @@ function showFindHelp(why) {
   const q = encodeURIComponent(`${$("edTitle").value} ${$("edArtist").value} 歌詞`.trim());
   $("findMsg").innerHTML = `${esc(why)} You can <a href="https://www.google.com/search?q=${q}" target="_blank" rel="noopener">search the web ↗</a> or <a href="https://lrclib.net" target="_blank" rel="noopener">LRCLIB ↗</a> and paste the lyrics below.`;
 }
-async function lrclib(params) {
+async function lrclib(params, tries = 2) {
   const u = new URL("https://lrclib.net/api/search");
   for (const [k, v] of Object.entries(params)) if (v) u.searchParams.set(k, v);
-  const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 9000);
-  try {
-    const r = await fetch(u, { signal: ctl.signal });
-    if (!r.ok) throw new Error("http " + r.status);
-    const j = await r.json();
-    return Array.isArray(j) ? j : [];
-  } finally { clearTimeout(to); }
+  for (let a = 1; ; a++) {
+    const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 25000);
+    try {
+      const r = await fetch(u.href, { signal: ctl.signal, mode: "cors", headers: { Accept: "application/json" } });
+      if (!r.ok) throw Object.assign(new Error("The lyrics library answered with error " + r.status + "."), { kind: "http" });
+      const j = await r.json();
+      return Array.isArray(j) ? j : [];
+    } catch (e) {
+      if (!e.kind) e.kind = e.name === "AbortError" ? "timeout" : "network";
+      if (a >= tries || e.kind === "http" && !/^5/.test(String(e.message.match(/\d+/)))) throw e;
+      await new Promise((res) => setTimeout(res, 1500));
+    } finally { clearTimeout(to); }
+  }
 }
 function renderFound(pickedId) {
   $("findResults").innerHTML = found.slice(0, 6).map((r, i) =>
@@ -680,6 +686,7 @@ $("edFind").onclick = async () => {
   const btn = $("edFind"); btn.disabled = true;
   $("findMsg").textContent = "Searching…"; $("findResults").innerHTML = "";
   const dur = hasAudio && isFinite(audio.duration) ? audio.duration : null;
+  const slow = setTimeout(() => { $("findMsg").textContent = "Still searching. The lyrics library can be slow…"; }, 6000);
   try {
     let list = await lrclib({ track_name: title, artist_name: artist });
     if (!list.length) list = await lrclib({ q: `${title} ${artist}`.trim() });
@@ -699,8 +706,12 @@ $("edFind").onclick = async () => {
       renderFound(null);
     }
   } catch (e) {
-    showFindHelp("This page couldn't reach the lyrics library from here.");
-  } finally { btn.disabled = false; }
+    console.warn("Find lyrics failed", e);
+    showFindHelp(e.kind === "timeout" ? "The lyrics library took too long to answer. Try again in a moment."
+      : e.kind === "http" ? e.message
+      : e.kind === "network" ? "This page couldn't reach the lyrics library (" + (e.message || "network error") + "). A content blocker or private relay can cause this."
+      : "Something went wrong while reading the results (" + (e.message || e) + ").");
+  } finally { clearTimeout(slow); btn.disabled = false; }
 };
 
 $("edTranslate").onclick = async () => {
